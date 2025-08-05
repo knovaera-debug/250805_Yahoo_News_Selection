@@ -1,275 +1,134 @@
 import os
+import datetime
 import json
-import time
-import re
-import random
-import requests
-from datetime import datetime, timedelta
-from email.utils import parsedate_to_datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from bs4 import BeautifulSoup
-import gspread
+def transfer_yahoo_news_from_source_sheet():
+    SOURCE_SPREADSHEET_ID = '1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w'  # ✅ 転送元のスプレッドシートIDに修正
+    DESTINATION_SPREADSHEET_ID = '1ELh95L385GfNcJahAx1mUH4SZBHtKImBp_wAAsQALkM' # ✅ 転送先のスプレッドシートIDのまま
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
-# 設定
-KEYWORD = "日産"  # 検索キーワード
-# 📝 スプレッドシートIDはGitHub Actionsの環境変数から読み込むことを推奨
-# ローカルで実行する場合は、以下を有効にする
-# SPREADSHEET_ID = "1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w"
-
-def format_datetime(dt_obj):
-    return dt_obj.strftime("%Y/%m/%d %H:%M")
-
-def parse_relative_time(pub_label: str, base_time: datetime) -> str:
-    pub_label = pub_label.strip().lower()
     try:
-        if "分前" in pub_label or "minute" in pub_label:
-            m = re.search(r"(\d+)", pub_label)
-            if m:
-                dt = base_time - timedelta(minutes=int(m.group(1)))
-                return format_datetime(dt)
-        elif "時間前" in pub_label or "hour" in pub_label:
-            h = re.search(r"(\d+)", pub_label)
-            if h:
-                dt = base_time - timedelta(hours=int(h.group(1)))
-                return format_datetime(dt)
-        elif "日前" in pub_label or "day" in pub_label:
-            d = re.search(r"(\d+)", pub_label)
-            if d:
-                dt = base_time - timedelta(days=int(d.group(1)))
-                return format_datetime(dt)
-        elif re.match(r'\d+月\d+日', pub_label):
-            dt = datetime.strptime(f"{base_time.year}年{pub_label}", "%Y年%m月%d日")
-            return format_datetime(dt)
-        elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
-            dt = datetime.strptime(pub_label, "%Y/%m/%d")
-            return format_datetime(dt)
-        elif re.match(r'\d{1,2}:\d{2}', pub_label):
-            t = datetime.strptime(pub_label, "%H:%M").time()
-            dt = datetime.combine(base_time.date(), t)
-            if dt > base_time:
-                dt -= timedelta(days=1)
-            return format_datetime(dt)
-    except:
-        pass
-    return "取得不可"
+        creds_json = os.environ.get('GCP_SA_KEY')
+        if not creds_json:
+            with open('key.json', 'r') as f:
+                creds_info = json.load(f)
+        else:
+            creds_info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        service = build('sheets', 'v4', credentials=creds)
+    except Exception as e:
+        print(f"エラー: Google Sheets APIの認証に失敗しました。詳細: {e}")
+        return
 
-def get_last_modified_datetime(url):
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))) 
+    yesterday = today - datetime.timedelta(days=1)
+    start_time = yesterday.replace(hour=15, minute=0, second=0, microsecond=0)
+    end_time = today.replace(hour=14, minute=59, second=59, microsecond=0)
+    destination_sheet_name = today.strftime('%y%m%d')
+
+    print(f"出力先シート名: {destination_sheet_name}")
+    print(f"期間: {start_time.strftime('%Y/%m/%d %H:%M:%S')} 〜 {end_time.strftime('%Y/%m/%d %H:%M:%S')}")
+
+    existing_data_in_destination = []
+    header_exists = False
     try:
-        response = requests.head(url, timeout=5)
-        if 'Last-Modified' in response.headers:
-            dt = parsedate_to_datetime(response.headers['Last-Modified'])
-            jst = dt.astimezone(timedelta(hours=9))
-            return format_datetime(jst)
-    except:
-        pass
-    return "取得不可"
+        spreadsheet_info = service.spreadsheets().get(spreadsheetId=DESTINATION_SPREADSHEET_ID).execute()
+        sheets = spreadsheet_info.get('sheets', [])
+        sheet_exists = any(sheet['properties']['title'] == destination_sheet_name for sheet in sheets)
+        if not sheet_exists:
+            print(f"出力先スプレッドシートに新しいシート「{destination_sheet_name}」を作成します。")
+            body = {'requests': [{'addSheet': {'properties': {'title': destination_sheet_name}}}]}
+            service.spreadsheets().batchUpdate(spreadsheetId=DESTINATION_SPREADSHEET_ID, body=body).execute()
+            print(f"新しいシート「{destination_sheet_name}」を作成しました。")
+        destination_sheet_range = f"'{destination_sheet_name}'!A:L"
+        result = service.spreadsheets().values().get(spreadsheetId=DESTINATION_SPREADSHEET_ID, range=destination_sheet_range).execute()
+        existing_data_in_destination = result.get('values', [])
+    except HttpError as e:
+        print(f"エラー: 出力先スプレッドシートへのアクセスに失敗しました。詳細: {e}")
+        return
+    except Exception as e:
+        print(f"エラー: 不明なエラーが発生しました。詳細: {e}")
+        return
 
-def get_google_news_with_selenium(keyword: str) -> list[dict]:
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    url = f"https://news.google.com/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
-    driver.get(url)
-    time.sleep(5)
-    for _ in range(3):
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+    existing_urls_in_destination = set()
+    if existing_data_in_destination and existing_data_in_destination[0][0] == 'ソース':
+        header_exists = True
+        for row in existing_data_in_destination[1:]:
+            if len(row) > 2 and row[2]:
+                existing_urls_in_destination.add(row[2])
 
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    driver.quit()
+    print(f"出力先シートに既存のニュースが {len(existing_urls_in_destination)} 件あります（URLで重複を判定）。")
 
-    articles = soup.find_all("article")
-    data = []
-    for article in articles:
-        try:
-            a_tag = article.select_one("a.JtKRv")
-            time_tag = article.select_one("time.hvbAAd")
-            source_tag = article.select_one("div.vr1PYe")
-            title = a_tag.text.strip()
-            href = a_tag.get("href")
-            url = "https://news.google.com" + href[1:] if href.startswith("./") else href
-            dt = datetime.strptime(time_tag.get("datetime"), "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
-            pub_date = format_datetime(dt)
-            source = source_tag.text.strip() if source_tag else "N/A"
-            data.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source})
-        except:
-            continue
-    print(f"✅ Googleニュース件数: {len(data)} 件")
-    return data
+    source_sheet_name = 'Yahoo'
+    try:
+        source_sheet_range = f"'{source_sheet_name}'!A:D"
+        result = service.spreadsheets().values().get(spreadsheetId=SOURCE_SPREADSHEET_ID, range=source_sheet_range).execute()
+        data = result.get('values', [])
+    except Exception as e:
+        print(f"エラー: コピー元シート「{source_sheet_name}」にアクセスできませんでした。詳細: {e}")
+        return
 
-def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    search_url = f"https://news.yahoo.co.jp/search?p={keyword}&ei=utf-8&categories=domestic,world,business,it,science,life,local"
-    driver.get(search_url)
-    time.sleep(5)
+    if not data:
+        print(f"エラー: コピー元シート「{source_sheet_name}」にデータがありません。")
+        return
 
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    driver.quit()
-    articles = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
-    articles_data = []
-
-    for article in articles:
-        try:
-            title_tag = article.find("div", class_=re.compile("sc-3ls169-0"))
-            title = title_tag.text.strip() if title_tag else ""
-            link_tag = article.find("a", href=True)
-            url = link_tag["href"] if link_tag else ""
-            time_tag = article.find("time")
-            date_str = time_tag.text.strip() if time_tag else ""
-            formatted_date = ""
-            if date_str:
-                date_str = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
-                try:
-                    dt_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
-                    formatted_date = format_datetime(dt_obj)
-                except:
-                    formatted_date = date_str
-
-            source_text = ""
-            source_tag = article.find("div", class_="sc-n3vj8g-0 yoLqH")
-            if source_tag:
-                inner = source_tag.find("div", class_="sc-110wjhy-8 bsEjY")
-                if inner and inner.span:
-                    candidate = inner.span.text.strip()
-                    if not candidate.isdigit():
-                        source_text = candidate
-            if not source_text or source_text.isdigit():
-                alt_spans = article.find_all(["span", "div"], string=True)
-                for s in alt_spans:
-                    text = s.text.strip()
-                    if 2 <= len(text) <= 20 and not text.isdigit() and re.search(r'[ぁ-んァ-ン一-龥A-Za-z]', text):
-                        source_text = text
-                        break
-
-            if title and url:
-                articles_data.append({
-                    "タイトル": title,
-                    "URL": url,
-                    "投稿日": formatted_date if formatted_date else "取得不可",
-                    "引用元": source_text
-                })
-        except:
-            continue
-
-    print(f"✅ Yahoo!ニュース件数: {len(articles_data)} 件")
-    return articles_data
-
-def get_msn_news_with_selenium(keyword: str) -> list[dict]:
-    now = datetime.utcnow() + timedelta(hours=9)
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
-    driver.get(url)
-    time.sleep(5)
-
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    driver.quit()
-    cards = soup.select("div.news-card")
-    data = []
-
-    for card in cards:
-        try:
-            title = card.get("data-title", "").strip()
-            url = card.get("data-url", "").strip()
-            source = card.get("data-author", "").strip()
-            pub_label = ""
-            pub_date = ""
-
-            pub_tag = card.find("span", attrs={"aria-label": True})
-            if pub_tag and pub_tag.has_attr("aria-label"):
-                pub_label = pub_tag["aria-label"].strip().lower()
-
-            pub_date = parse_relative_time(pub_label, now)
-
-            if pub_date == "取得不可" and url:
-                pub_date = get_last_modified_datetime(url)
-
-            if title and url:
-                data.append({
-                    "タイトル": title,
-                    "URL": url,
-                    "投稿日": pub_date,
-                    "引用元": source if source else "MSN"
-                })
-        except Exception as e:
-            print(f"⚠️ MSN記事処理エラー: {e}")
-            continue
-
-    print(f"✅ MSNニュース件数: {len(data)} 件")
-    return data
-
-def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
-    # 認証情報を環境変数またはローカルファイルから読み込む
-    credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
-    if credentials_json_str:
-        # 環境変数からJSONを読み込む
-        credentials = json.loads(credentials_json_str)
-        gc = gspread.service_account_from_dict(credentials)
-    else:
-        # ローカルファイルからJSONを読み込む
-        # 📝 ファイル名を 'key.json' に変更
-        gc = gspread.service_account(filename='key.json')
-
-    for attempt in range(5):
-        try:
-            sh = gc.open_by_key(spreadsheet_id)
-            try:
-                worksheet = sh.worksheet(worksheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet = sh.add_worksheet(title=worksheet_name, rows="1", cols="4")
-                worksheet.append_row(['タイトル', 'URL', '投稿日', '引用元'])
-
-            existing_data = worksheet.get_all_values()
-            existing_urls = set(row[1] for row in existing_data[1:] if len(row) > 1)
-
-            new_data = [[a['タイトル'], a['URL'], a['投稿日'], a['引用元']] for a in articles if a['URL'] not in existing_urls]
-            if new_data:
-                worksheet.append_rows(new_data, value_input_option='USER_ENTERED')
-                print(f"✅ {len(new_data)}件をスプレッドシートに追記しました。")
-            else:
-                print("⚠️ 追記すべき新しいデータはありません。")
-            return
-        except gspread.exceptions.APIError as e:
-            print(f"⚠️ Google API Error (attempt {attempt + 1}/5): {e}")
-            time.sleep(5 + random.random() * 5)
-
-    raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
-
-if __name__ == "__main__":
-    # スプレッドシートIDを環境変数から取得
-    spreadsheet_id_from_env = os.environ.get('SPREADSHEET_ID')
-    spreadsheet_id = spreadsheet_id_from_env if spreadsheet_id_from_env else "1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w"
-
-    print(f"スプレッドシートID: {spreadsheet_id}")
-    print(f"検索キーワード: {KEYWORD}")
+    print(f"シート「{source_sheet_name}」から {len(data) - 1} 件のニュースを読み込みました（ヘッダーを除く）。")
     
-    # Google News
-    print("\n--- Google News ---")
-    google_news_articles = get_google_news_with_selenium(KEYWORD)
-    if google_news_articles:
-        write_to_spreadsheet(google_news_articles, spreadsheet_id, "Google")
+    collected_news = []
+    for i, row in enumerate(data):
+        if i == 0:
+            continue
+        try:
+            title, url, post_date_raw, source = row
+            post_date = None
+            if isinstance(post_date_raw, str):
+                try:
+                    post_date_without_year = datetime.datetime.strptime(post_date_raw, '%m/%d %H:%M')
+                    post_date = post_date_without_year.replace(year=today.year)
+                except ValueError:
+                    try:
+                        post_date = datetime.datetime.strptime(post_date_raw, '%Y/%m/%d %H:%M:%S')
+                    except ValueError:
+                        pass
+            if post_date:
+                post_date = post_date.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+                if start_time <= post_date <= end_time and url not in existing_urls_in_destination:
+                    new_row = [source_sheet_name, title, url, post_date.strftime('%Y/%m/%d'), source]
+                    collected_news.append(new_row)
+        except Exception as e:
+            print(f"警告: 行 {i+1} でエラー: {e}")
+            continue
 
-    # Yahoo! News
-    print("\n--- Yahoo! News ---")
-    yahoo_news_articles = get_yahoo_news_with_selenium(KEYWORD)
-    if yahoo_news_articles:
-        write_to_spreadsheet(yahoo_news_articles, spreadsheet_id, "Yahoo")
+    if not collected_news:
+        print("期間内に新しいニュースは見つかりませんでした。")
+        return
 
-    # MSN News
-    print("\n--- MSN News ---")
-    msn_news_articles = get_msn_news_with_selenium(KEYWORD)
-    if msn_news_articles:
-        write_to_spreadsheet(msn_news_articles, spreadsheet_id, "MSN")
+    print(f"新規に追記するニュースの数: {len(collected_news)}")
+
+    data_to_append = []
+    for i, row in enumerate(collected_news):
+        row_data = row + [''] * 4
+        k_value = row[1][:20]
+        l_value = i + 1
+        row_data += ['', k_value, l_value]
+        data_to_append.append(row_data)
+
+    if not header_exists:
+        header_row = ['ソース', 'タイトル', 'URL', '投稿日', '引用元', 'コメント数', 'ポジネガ', 'カテゴリー', '有料記事', 'J列', 'K列', 'L列']
+        service.spreadsheets().values().append(spreadsheetId=DESTINATION_SPREADSHEET_ID, range=f"'{destination_sheet_name}'!A1", valueInputOption='USER_ENTERED', body={'values': [header_row]}).execute()
+        print(f"シート「{destination_sheet_name}」にヘッダーを追加しました。")
+
+    service.spreadsheets().values().append(
+        spreadsheetId=DESTINATION_SPREADSHEET_ID,
+        range=f"'{destination_sheet_name}'!A:L",
+        valueInputOption='USER_ENTERED',
+        insertDataOption='INSERT_ROWS',
+        body={'values': data_to_append}
+    ).execute()
+    print(f"スプレッドシートに {len(data_to_append)} 件を追記しました。")
+
+if __name__ == '__main__':
+    transfer_yahoo_news_from_source_sheet()
