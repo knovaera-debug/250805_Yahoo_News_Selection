@@ -6,12 +6,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 def transfer_yahoo_news_from_source_sheet():
-    SOURCE_SPREADSHEET_ID = '1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w'  # ✅ 転送元のスプレッドシートIDに修正
-    DESTINATION_SPREADSHEET_ID = '1ELh95L385GfNcJahAx1mUH4SZBHtKImBp_wAAsQALkM' # ✅ 転送先のスプレッドシートIDのまま
+    SOURCE_SPREADSHEET_ID = '1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w'
+    DESTINATION_SPREADSHEET_ID = '1ELh95L385GfNcJahAx1mUH4SZBHtKImBp_wAAsQALkM'
     SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
     try:
-        creds_json = os.environ.get('GCP_SA_KEY')
+        # ✅ 環境変数名を GCP_SERVICE_ACCOUNT_KEY に修正
+        creds_json = os.environ.get('GCP_SERVICE_ACCOUNT_KEY') 
         if not creds_json:
             with open('key.json', 'r') as f:
                 creds_info = json.load(f)
