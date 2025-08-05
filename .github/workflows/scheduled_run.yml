@@ -1,32 +1,30 @@
-name: Scheduled Transfer Yahoo News
+name: Scheduled Run
 
 on:
-  schedule:
-    # JST 15:20 = UTC 06:20 に実行
-    - cron: '20 6 * * *'
-  # 手動実行も許可
   workflow_dispatch:
+  schedule:
+    - cron: '0 6,10,15,20,23 * * *' # UTC時間で毎日6時, 10時, 15時, 20時, 23時に実行
 
 jobs:
-  transfer:
+  run-script:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install openpyxl pandas
 
-      - name: Run script
+      - name: Run Python script
         env:
-          GCP_SA_KEY: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: |
-          python main.py
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          SPREADSHEET_ID: 1ZqRekcKkUUoVxZuO8hrWRWwTauyEk8kD_NmV5IZy02w # 📝 ここを修正
+        run: python main.py
