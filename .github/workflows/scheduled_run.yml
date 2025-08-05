@@ -1,0 +1,33 @@
+name: Scheduled Transfer Yahoo News
+
+on:
+  schedule:
+    # 日本時間 15:20 → UTC 06:20
+    - cron: '20 6 * * *'
+
+  # 手動実行も可能にする
+  workflow_dispatch:
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          GCP_SA_KEY: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          python main.py
