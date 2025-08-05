@@ -2,10 +2,9 @@ name: Scheduled Transfer Yahoo News
 
 on:
   schedule:
-    # 日本時間 15:20 → UTC 06:20
+    # JST 15:20 = UTC 06:20 に実行
     - cron: '20 6 * * *'
-
-  # 手動実行も可能にする
+  # 手動実行も許可
   workflow_dispatch:
 
 jobs:
